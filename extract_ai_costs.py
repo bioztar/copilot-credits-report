@@ -35,7 +35,6 @@ ROLE = {
                    "(not visible to this user today)", "Owner of that Azure subscription (IT cloud team)"),
     "azure_res": ("Reader on the subscription", "Owner of the IT Azure subscription"),
     "pp": ("Power Platform Administrator (Entra role)", "Global Admin"),
-    "viva": ("Insights Analyst (global partition) in Viva Insights", "People Analytics"),
     "github": ("GitHub enterprise owner or billing manager", "GitHub enterprise owner"),
 }
 
@@ -339,42 +338,54 @@ def power_platform(run: Run, az: AzSignIn):
         attempt(run, src, model, f"api.powerplatform.com{path.split('?')[0]}", f"GET {path}", "pp", f)
 
 
-# ---------- Manual exports already in the Usage folder, and sources with no API ----------
+# ---------- Service coverage: which Copilot services the Graph data covers ----------
 
-def local_exports(run: Run, usage: pathlib.Path):
-    src = "Admin center exports (manual, in Usage folder)"
-    sets = [("Credits per user, monthly (M365 admin center › Copilot › Cost Management › Consumption › Export)",
-             "M365AIConsumptionByUser*.csv", "Export_AIConsumption"),
-            ("Cowork tasks per user (admin center Cowork report export)", "CoworkUserDetails*.csv", "Export_CoworkUsers"),
-            ("Daily Graph snapshots from pull_credits.py (history)", "snapshots/credits_*.csv", "Snapshots_Credits")]
-    for model, pattern, tab in sets:
-        def f(pattern=pattern, tab=tab):
-            frames = [pd.read_csv(p, sep=None, engine="python", encoding="utf-8-sig").assign(sourceFile=p.name)
-                      for p in sorted(usage.glob(pattern))]
-            df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-            return df.to_dict("records"), run.tab(tab, df), f"{len(frames)} files"
-        attempt(run, src, model, f"local file {pattern}", "read CSV files", None, f)
+# serviceId fragment -> (plain name, note). Matched case-insensitively against the policy's service list.
+SERVICES = [
+    ("cowork", "Copilot Cowork", "Per user via Graph serviceBalances."),
+    ("copilotCode", "Copilot Code", "New Microsoft 365 Copilot capability in the Copilot stack, next to Cowork. "
+                                    "NOT GitHub Copilot (that is gitHubCopilotApp). Per user via Graph serviceBalances."),
+    ("gitHubCopilotApp", "GitHub Copilot app in Microsoft 365", "Enabled in the policy; GitHub Copilot seats and premium "
+                                                                 "requests are billed in GitHub, not here."),
+    ("autopilot", "Copilot Autopilot", "Announced, expected soon, billed in Copilot credits like Cowork. Will appear in "
+                                       "the policy service list and serviceBalances with no extra access."),
+    ("copilotStudio", "Copilot Studio agents", "Enabled in the policy but no per-user balance; per-agent credits only "
+                                               "via the Power Platform API."),
+    ("workIQ", "Work IQ API", "Per user via Graph serviceBalances."),
+]
 
-    manual = [("Viva Insights Copilot consumption query", "Credits per person x service x day, with history (preview)",
-               "Viva Insights › Analyst › Copilot consumption query (no API)", "viva"),
-              ("Power Platform admin center", "Copilot Studio per-agent consumption export (CSV)",
-               "PPAC › Licensing › Copilot Studio › Download", "pp"),
-              ("GitHub Copilot billing", "GitHub Copilot seats / premium requests (in TEC-05 chargeback scope)",
-               "GET api.github.com/enterprises/{enterprise}/settings/billing/usage", "github")]
-    for source, model, ep, key in manual:
-        run.record(source, model, ep, "not run by this script", "NOT RUN", 0, "manual or separate system", key)
+
+def service_coverage(run: Run):
+    pol = run.tabs.get("Graph_PolicyServices", pd.DataFrame())
+    bal = run.tabs.get("Graph_UserServiceCredits", pd.DataFrame())
+    ids = list(pol["serviceId"]) if "serviceId" in pol else []
+    for frag, name, note in SERVICES:
+        hit = [i for i in ids if frag.lower() in i.lower()]
+        used = bal[bal["serviceId"].isin(hit)]["consumedQuantity"].sum() if hit and "serviceId" in bal else 0
+        status = "OK" if hit else "NOT YET IN TENANT"
+        run.record(f"Service: {name}", note, "graph …/costManagement/spendingPolicies/{id}/serviceSettings + serviceBalances",
+                   "from the Graph Copilot Cost Management calls above", status, len(hit),
+                   f"serviceId {', '.join(hit) or frag + ' (absent)'}; credits this month {used:,.0f}",
+                   "pp" if frag == "copilotStudio" else None)
+
+
+def not_automated(run: Run):
+    run.record("GitHub Copilot billing", "GitHub Copilot seats / premium requests (in TEC-05 chargeback scope)",
+               "GET api.github.com/enterprises/{enterprise}/settings/billing/usage", "not run: needs a GitHub token",
+               "NOT RUN", 0, "API exists, separate GitHub sign-in", "github")
 
 
 # ---------- Workbook ----------
 
 def write_workbook(run: Run, path: pathlib.Path, stamp: str):
     navy, white = PatternFill("solid", fgColor="002957"), Font(bold=True, color="FFFFFF")
-    colour = {"OK": "C6EFCE", "OK (empty)": "FFF2CC", "NO ACCESS": "FFC7CE", "ERROR": "FFC7CE", "NOT RUN": "E7E6E6"}
+    colour = {"OK": "C6EFCE", "OK (empty)": "FFF2CC", "NO ACCESS": "FFC7CE", "ERROR": "FFC7CE", "NOT RUN": "E7E6E6", "NOT YET IN TENANT": "FFF2CC"}
     readme = pd.DataFrame({"AI cost & usage source extraction": [
         f"Run: {stamp} (local time). Internal use.",
         "Access: every source tried, status, and for each one not reached the role to ask for and who grants it.",
         "Queries: every HTTP call made, method, URL, body, HTTP status, and the raw response file (raw/ folder next to this workbook).",
         "Other tabs: the data each source returned, flattened. 'AI related' columns flag Copilot / agent / AI rows.",
+        "API sources only: everything here can be pulled unattended or on a schedule; no manually exported files are read.",
         "Graph returns credits (1 credit = 0.01 USD PAYG list price); only Azure Cost Management returns invoiced money.",
         "Contains named per-user data: keep this folder restricted."]})
     sheets = {"README": readme, "Access": pd.DataFrame(run.access), "Queries": pd.DataFrame(run.queries), **run.tabs}
@@ -400,7 +411,7 @@ def main(usage_dir: str):
     az = AzSignIn(run.say)
     for step in (lambda: graph_cost(run), lambda: graph_usage(run), lambda: graph_licences(run, az),
                  lambda: graph_extra(run), lambda: azure(run, az), lambda: power_platform(run, az),
-                 lambda: local_exports(run, usage)):
+                 lambda: service_coverage(run), lambda: not_automated(run)):
         try:
             step()
         except (Exception, SystemExit) as e:  # sign-in failure for a whole family: log it and carry on
