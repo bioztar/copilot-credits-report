@@ -21,18 +21,18 @@ CM = f"{G}/beta/copilot/costManagement"
 CACHE = pathlib.Path.home() / ".config/copilot-credits/msal_cache.json"
 
 
-def token(interactive: bool) -> str:
+def token(interactive: bool, scopes: list = SCOPES) -> str:
     cache = msal.SerializableTokenCache()
     if CACHE.exists():
         cache.deserialize(CACHE.read_text())
     app = msal.PublicClientApplication(CLIENT, token_cache=cache,
                                        authority="https://login.microsoftonline.com/organizations", timeout=30)
     accts = app.get_accounts()
-    res = app.acquire_token_silent(SCOPES, account=accts[0]) if accts else None
+    res = app.acquire_token_silent(scopes, account=accts[0]) if accts else None
     if not res:
         if not interactive:
             sys.exit("Sign-in expired: run once by hand to get a new device code.")
-        flow = app.initiate_device_flow(scopes=SCOPES)
+        flow = app.initiate_device_flow(scopes=scopes)
         print(flow.get("message", flow), flush=True)
         while time.time() < flow["expires_at"]:
             try:
