@@ -29,9 +29,10 @@ ROLE = {
     "graph_usage": ("Reports Reader (or higher) + Reports.Read.All", "Global Admin"),
     "graph_skus": ("Any directory read role (Global Reader / License Administrator)", "Global Admin"),
     "audit": ("Purview Audit Reader role + AuditLogsQuery.Read.All consent", "Security (Roxanne Andrews), plan task #224"),
-    "agents": ("AI Administrator or Global Reader + CopilotPackages.Read.All consent", "Global Admin"),
+    "agents": ("Not a role: the API needs an Agent 365 licence in the tenant (then CopilotPackages.Read.All)", "Licensing / Microsoft account team"),
     "billing": ("MCA: Billing account reader / EA: Enterprise read-only", "Finance / owner of the Microsoft billing account"),
-    "azure_cost": ("Cost Management Reader on the subscription that pays the Copilot billing policies", "Owner of the IT Azure subscription"),
+    "azure_cost": ("Cost Management Reader on the subscription that pays the Copilot / Copilot Studio billing policies "
+                   "(not visible to this user today)", "Owner of that Azure subscription (IT cloud team)"),
     "azure_res": ("Reader on the subscription", "Owner of the IT Azure subscription"),
     "pp": ("Power Platform Administrator (Entra role)", "Global Admin"),
     "viva": ("Insights Analyst (global partition) in Viva Insights", "People Analytics"),
@@ -159,8 +160,8 @@ def graph_cost(run: Run):
     state = {}
 
     def balance():
-        b = {k: v for k, v in get_json(run, src, f"{pc.CM}/getTenantCreditBalance()", tok).items() if "@odata" not in k}
-        return [b], run.tab("Graph_TenantBalance", [b]), "tenant credits consumed / remaining"
+        rows = get_json(run, src, f"{pc.CM}/getTenantCreditBalance()", tok).get("billingMethodBalances", [])
+        return rows, run.tab("Graph_TenantBalance", rows), "credits per billing method (PAYG, prepaid)"
 
     def policies():
         state["pol"] = list(run.pages(src, f"{pc.CM}/spendingPolicies", tok))
@@ -180,6 +181,11 @@ def graph_cost(run: Run):
                     users[u["id"]] = {**u, "policy": p.get("displayName")}
         rows = [{"upn": u["userPrincipalName"], "displayName": u["displayName"], "policy": u["policy"], **b}
                 for uid, u in users.items() for b in run.pages(src, f"{pc.CM}/userBalances/{uid}/serviceBalances", tok)]
+        if rows:  # one row per user, one column per service: the view to read first
+            piv = pd.DataFrame(rows).pivot_table(index=["upn", "displayName", "policy"], columns="serviceId",
+                                                 values="consumedQuantity", aggfunc="sum", fill_value=0)
+            piv = piv.loc[:, piv.sum() > 0].assign(total=lambda d: d.sum(axis=1)).sort_values("total", ascending=False)
+            run.tab("Graph_CreditsPerUser", piv.round(2).reset_index())
         return rows, run.tab("Graph_UserServiceCredits", rows), f"{len(users)} users in policy groups, current month"
 
     ep = "graph.microsoft.com/beta/copilot/costManagement"
