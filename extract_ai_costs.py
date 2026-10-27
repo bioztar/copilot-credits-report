@@ -117,6 +117,9 @@ class Run:
             body = r.json()
             yield from body.get("value", [])
             url = body.get("@odata.nextLink") or body.get("nextLink")
+            if url:  # Graph bug: the ByDate report's nextLink drops "/copilot" and then 400s
+                url = url.replace("/beta/reports/getMicrosoft365CopilotUsageUserDetailByDate",
+                                  "/beta/copilot/reports/getMicrosoft365CopilotUsageUserDetailByDate")
 
     def record(self, source, model, endpoint, query, status, rows=0, detail="", role_key=None, tab=""):
         role, ask = ROLE.get(role_key, ("", ""))
@@ -218,21 +221,23 @@ def graph_usage(run: Run):
         return f
 
     def by_date():
-        rows = []
-        for back in range(1, 29):
+        # Microsoft only serves the 7 days before the report's refresh date (a day or two behind today):
+        # try the last 10 days and keep the ones it accepts. History beyond 7 days = store each run's output.
+        rows, last_err = [], None
+        for back in range(1, 11):
             day = (dt.date.today() - dt.timedelta(days=back)).isoformat()
             try:
                 rows += list(run.pages(src, f"{G}/beta/copilot/reports/getMicrosoft365CopilotUsageUserDetailByDate(date={day})"
                                             "?$format=application/json", tok))
-            except PermissionError:
-                if not rows:
-                    raise
-                break  # older dates not kept: stop at the first refusal
-        return rows, run.tab("Graph_CopilotUsageDaily", rows), "user x day, last 28 days"
+            except PermissionError as e:
+                last_err = e
+        if not rows and last_err:
+            raise last_err
+        return rows, run.tab("Graph_CopilotUsageDaily", rows), "user x day, the 7 days Microsoft keeps"
 
     ep = "graph.microsoft.com/…/reports/getMicrosoft365Copilot*"
     attempt(run, src, "Licensed Copilot usage per user per day (new Oct 2026 function)", ep,
-            "GET /beta/copilot/reports/getMicrosoft365CopilotUsageUserDetailByDate(date=…) for each of the last 28 days",
+            "GET /beta/copilot/reports/getMicrosoft365CopilotUsageUserDetailByDate(date=…) for each of the last 10 days (7 served)",
             "graph_usage", by_date)
     attempt(run, src, "Licensed M365 Copilot activity per user (prompts, last use per app)", ep,
             "GET /v1.0/copilot/reports/getMicrosoft365CopilotUsageUserDetail(period='D180')", "graph_usage", detail)
