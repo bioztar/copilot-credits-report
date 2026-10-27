@@ -217,7 +217,23 @@ def graph_usage(run: Run):
             return rows, run.tab(f"Graph_Copilot{name[9:]}", rows), "period D180"
         return f
 
+    def by_date():
+        rows = []
+        for back in range(1, 29):
+            day = (dt.date.today() - dt.timedelta(days=back)).isoformat()
+            try:
+                rows += list(run.pages(src, f"{G}/beta/copilot/reports/getMicrosoft365CopilotUsageUserDetailByDate(date={day})"
+                                            "?$format=application/json", tok))
+            except PermissionError:
+                if not rows:
+                    raise
+                break  # older dates not kept: stop at the first refusal
+        return rows, run.tab("Graph_CopilotUsageDaily", rows), "user x day, last 28 days"
+
     ep = "graph.microsoft.com/…/reports/getMicrosoft365Copilot*"
+    attempt(run, src, "Licensed Copilot usage per user per day (new Oct 2026 function)", ep,
+            "GET /beta/copilot/reports/getMicrosoft365CopilotUsageUserDetailByDate(date=…) for each of the last 28 days",
+            "graph_usage", by_date)
     attempt(run, src, "Licensed M365 Copilot activity per user (prompts, last use per app)", ep,
             "GET /v1.0/copilot/reports/getMicrosoft365CopilotUsageUserDetail(period='D180')", "graph_usage", detail)
     for name in ("UserCountSummary", "UserCountTrend"):
@@ -410,6 +426,47 @@ def pp_inventory(run: Run, az: AzSignIn):
             "pp", f)
 
 
+def dataverse(run: Run, az: AzSignIn):
+    """Per environment: Copilot Studio agents (bots) and sessions per agent in the last 30 days (conversationtranscripts).
+    Needs System Administrator / Bot Transcript Viewer in each environment; the Power Platform Administrator role gives it everywhere."""
+    src = "Dataverse (per environment)"
+
+    def f():
+        envs = get_json(run, src, f"{PPAPI}/environmentmanagement/environments?api-version=2024-10-01", az.token(PPAPI))["value"]
+        since = (dt.date.today() - dt.timedelta(days=30)).isoformat()
+        rows, denied = [], 0
+        inv = run.tabs.get("PP_AgentInventory", pd.DataFrame())
+        hosts = set(inv["environmentId"]) if "environmentId" in inv else None  # only environments that hold agents
+        for e in [e for e in envs if e.get("url") and (hosts is None or e["id"] in hosts)]:
+            base, name = e["url"].rstrip("/") + "/api/data/v9.2", e.get("displayName")
+            try:
+                tok = az.token(e["url"].rstrip("/"))
+            except RuntimeError:
+                denied += 1
+                continue
+            probe = run.call(src, "GET", f"{base}/conversationtranscripts?$top=1&$select=createdon", tok)
+            if not probe.ok:
+                denied += 1
+                continue
+            r = run.call(src, "GET", f"{base}/conversationtranscripts?$apply=filter(createdon ge {since})/groupby((_bot_conversationtranscriptid_value),"
+                                     "aggregate($count as sessions))", tok)
+            if not r.ok:
+                denied += 1
+                continue
+            bots = run.call(src, "GET", f"{base}/bots?$select=botid,name,createdon,publishedon", tok)
+            names = {b["botid"]: b["name"] for b in (bots.json().get("value", []) if bots.ok else [])}
+            rows += [{"environment": name, "environmentId": e["id"], "agentId": x["_bot_conversationtranscriptid_value"],
+                      "agent": names.get(x["_bot_conversationtranscriptid_value"]), "sessions last 30 days": x["sessions"]}
+                     for x in r.json().get("value", [])]
+        if denied and not rows:
+            raise PermissionError(f"no readable transcripts in any of {denied} environments")
+        return rows, run.tab("DV_AgentSessions", rows), f"transcripts unreadable in {denied} environments"
+
+    attempt(run, src, "Copilot Studio sessions per agent (conversation transcripts), all environments",
+            "{environment}.crm4.dynamics.com/api/data/v9.2/conversationtranscripts + bots",
+            "GET conversationtranscripts $apply groupby bot, last 30 days; GET bots", "pp", f)
+
+
 # ---------- Service coverage: which Copilot services the Graph data covers ----------
 
 # serviceId fragment -> (plain name, note). Matched case-insensitively against the policy's service list.
@@ -483,7 +540,7 @@ def main(usage_dir: str):
     az = AzSignIn(run.say)
     for step in (lambda: graph_cost(run), lambda: graph_usage(run), lambda: graph_licences(run, az),
                  lambda: my_roles(run, az), lambda: graph_extra(run), lambda: audit_probe(run, az), lambda: azure(run, az),
-                 lambda: power_platform(run, az), lambda: pp_inventory(run, az),
+                 lambda: power_platform(run, az), lambda: pp_inventory(run, az), lambda: dataverse(run, az),
                  lambda: service_coverage(run), lambda: not_automated(run)):
         try:
             step()
