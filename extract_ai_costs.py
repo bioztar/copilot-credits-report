@@ -32,7 +32,8 @@ ROLE = {
     "agents": ("Not a role: the API needs an Agent 365 licence in the tenant (then CopilotPackages.Read.All)", "Licensing / Microsoft account team"),
     "billing": ("MCA: Billing account reader / EA: Enterprise read-only", "Finance / owner of the Microsoft billing account"),
     "azure_cost": ("Cost Management Reader on the subscription that pays the Copilot / Copilot Studio billing policies "
-                   "(not visible to this user today)", "Owner of that Azure subscription (IT cloud team)"),
+                   "(not visible to this user today). If even Contributor gets 401, the Enterprise Agreement setting "
+                   "'Account owner can view charges' is off and only the EA admin can switch it on", "Owner of that Azure subscription (IT cloud team)"),
     "azure_res": ("Reader on the subscription", "Owner of the IT Azure subscription"),
     "pp": ("Power Platform Administrator (Entra role)", "Global Admin"),
     "github": ("GitHub enterprise owner or billing manager", "GitHub enterprise owner"),
@@ -244,8 +245,6 @@ def graph_licences(run: Run, az: AzSignIn):
 def graph_extra(run: Run):
     """Sources that need an extra Graph consent; a refused consent is recorded as NO ACCESS."""
     checks = [
-        ("Purview audit log (Graph)", "Audit log search jobs (CopilotInteraction records for Cowork activity)",
-         "AuditLogsQuery.Read.All", f"{G}/v1.0/security/auditLog/queries", "audit", "Graph_AuditQueries"),
         ("Copilot agent catalog (Graph)", "Agents / Copilot packages in the tenant (inventory to join with costs)",
          "CopilotPackages.Read.All", f"{G}/beta/copilot/admin/catalog/packages", "agents", "Graph_AgentCatalog"),
     ]
@@ -255,6 +254,39 @@ def graph_extra(run: Run):
             rows = list(run.pages(src, url, tok))
             return rows, run.tab(tab, rows), ""
         attempt(run, src, model, url.replace("https://", ""), f"GET {url.replace(G, '')}  (scope {scope})", key, f)
+
+
+def audit_probe(run: Run, az: AzSignIn):
+    """Listing audit searches works without the role; only creating one proves it. Creates one small search
+    (signed-in user's own Copilot interactions, last 24 h) and leaves it; results are read on a later run."""
+    src = "Purview audit log (Graph)"
+
+    def f():
+        me = get_json(run, src, f"{G}/v1.0/me?$select=userPrincipalName", az.token(G))["userPrincipalName"]
+        upn = me.replace("_admin@", "@")  # admin accounts do not use Copilot; their day-to-day twin does
+        now = dt.datetime.now(dt.timezone.utc)
+        body = {"displayName": f"access test {now:%Y-%m-%d}", "recordTypeFilters": ["copilotInteraction"],
+                "filterStartDateTime": f"{now - dt.timedelta(days=1):%Y-%m-%dT%H:%M:%SZ}",
+                "filterEndDateTime": f"{now:%Y-%m-%dT%H:%M:%SZ}", "userPrincipalNameFilters": [upn]}
+        r = run.call(src, "POST", f"{G}/v1.0/security/auditLog/queries", pc.token(True, [f"{G}/AuditLogsQuery.Read.All"]), body)
+        if not r.ok:
+            raise PermissionError(err_text(r))
+        return [r.json()], run.tab("Graph_AuditSearch", [r.json()]), "search created; records readable once it succeeds"
+
+    attempt(run, src, "Copilot / Cowork interaction audit records (who, when, which agent / app)",
+            "graph.microsoft.com/v1.0/security/auditLog/queries", "POST one search: copilotInteraction, own user, 24 h",
+            "audit", f)
+
+
+def my_roles(run: Run, az: AzSignIn):
+    src = "Signed-in user's Entra roles"
+
+    def f():
+        rows = list(run.pages(src, f"{G}/v1.0/me/memberOf/microsoft.graph.directoryRole?$select=displayName,description", az.token(G)))
+        return rows, run.tab("Me_EntraRoles", rows), ", ".join(r["displayName"] for r in rows)
+
+    attempt(run, src, "What the signing-in account can already do", "graph.microsoft.com/v1.0/me/memberOf",
+            "GET /me/memberOf/microsoft.graph.directoryRole", None, f)
 
 
 # ---------- Azure: billing, cost management, AI resources ----------
@@ -338,6 +370,46 @@ def power_platform(run: Run, az: AzSignIn):
         attempt(run, src, model, f"api.powerplatform.com{path.split('?')[0]}", f"GET {path}", "pp", f)
 
 
+def pp_inventory(run: Run, az: AzSignIn):
+    """Power Platform inventory: every Copilot Studio agent with model, channels, triggers, owner. Readable without
+    the Power Platform admin role. A query returns at most 1000 rows, so it is split by first hex digit of the id."""
+    src = "Power Platform inventory"
+
+    def f():
+        users = {u["id"]: u for u in run.pages(src, f"{G}/v1.0/users?$select=id,userPrincipalName,department&$top=999", az.token(G))}
+        tok, rows = az.token(PPAPI), []
+        for h in "0123456789abcdef":
+            body = {"TableName": "PowerPlatformResources", "Clauses": [
+                {"$type": "where", "FieldName": "type", "Operator": "==", "Values": ["'microsoft.copilotstudio/agents'"]},
+                {"$type": "where", "FieldName": "name", "Operator": "startswith", "Values": [f"'{h}'"]},
+                {"$type": "take", "TakeCount": 1000}]}
+            r = run.call(src, "POST", f"{PPAPI}/resourcequery/resources/query?api-version=2024-10-01", tok, body)
+            if not r.ok:
+                raise PermissionError(err_text(r))
+            rows += r.json().get("data", [])
+        out = []
+        for a in rows:
+            p, owner = a.get("properties") or {}, users.get((a.get("properties") or {}).get("ownerId"), {})
+            cc, sv = p.get("componentsCounts") or {}, p.get("sharedWithViewers") or {}
+            out.append({"agent": p.get("displayName"), "agentId": a["name"], "environmentId": p.get("environmentId"),
+                        "createdIn": p.get("createdIn"), "harness": p.get("harness"), "model": p.get("model"),
+                        "orchestration": p.get("orchestration"), "channels": ", ".join(p.get("channels") or []),
+                        "autonomous (has triggers)": bool(p.get("triggers")), "triggers": len(p.get("triggers") or []),
+                        "flows": len(p.get("flows") or []), "connectors": len(p.get("powerPlatformConnectors") or []),
+                        "knowledge": cc.get("knowledge"), "tools": cc.get("tools"), "connectedAgents": cc.get("connectedAgents"),
+                        "webSearch": p.get("isWebSearchEnabledForKnowledge"), "sharedWithTenant": sv.get("entireTenant"),
+                        "sharedUsers": sv.get("userCount"), "sharedGroups": sv.get("groupCount"),
+                        "authentication": p.get("authentication"), "quarantined": p.get("isQuarantined"),
+                        "createdAt": p.get("createdAt"), "lastPublishedAt": p.get("lastPublishedAt"),
+                        "ownerUpn": owner.get("userPrincipalName"), "ownerDepartment": owner.get("department"),
+                        "entraAgentId": p.get("entraAgentId")})
+        return out, run.tab("PP_AgentInventory", out), f"{sum(x['autonomous (has triggers)'] for x in out)} autonomous"
+
+    attempt(run, src, "Every Copilot Studio agent: model, channels, autonomous triggers, sharing, owner + department",
+            "api.powerplatform.com/resourcequery/resources/query", "POST KQL: type == copilotstudio/agents, 16 id-prefix slices",
+            "pp", f)
+
+
 # ---------- Service coverage: which Copilot services the Graph data covers ----------
 
 # serviceId fragment -> (plain name, note). Matched case-insensitively against the policy's service list.
@@ -410,7 +482,8 @@ def main(usage_dir: str):
     run = Run(usage / "AI_Cost_Extraction" / stamp)
     az = AzSignIn(run.say)
     for step in (lambda: graph_cost(run), lambda: graph_usage(run), lambda: graph_licences(run, az),
-                 lambda: graph_extra(run), lambda: azure(run, az), lambda: power_platform(run, az),
+                 lambda: my_roles(run, az), lambda: graph_extra(run), lambda: audit_probe(run, az), lambda: azure(run, az),
+                 lambda: power_platform(run, az), lambda: pp_inventory(run, az),
                  lambda: service_coverage(run), lambda: not_automated(run)):
         try:
             step()
