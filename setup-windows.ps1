@@ -31,6 +31,6 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
 # StartWhenAvailable: if the laptop was off/asleep at $At, run as soon as it is back.
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-  -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+  -ExecutionTimeLimit (New-TimeSpan -Hours 3)  # audit searches can take an hour each
 Register-ScheduledTask -TaskName 'Copilot credits report' -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 Write-Host "Scheduled daily at $At (task 'Copilot credits report'). Log: $home_\run.log"

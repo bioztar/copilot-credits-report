@@ -24,10 +24,18 @@ if ($LASTEXITCODE -ne 0) { throw "pull_credits failed (exit $LASTEXITCODE), see 
 & $py "$PSScriptRoot\build_report.py" $UsageDir *>> $log
 if ($LASTEXITCODE -ne 0) { throw "build_report failed (exit $LASTEXITCODE), see $log" }
 
-# Cowork activity from the Purview audit log (last 8 days, merged into cowork_events.csv), then its HTML report.
-# Non-fatal: the audit search can take up to an hour, and credits must not wait for it.
-if (-not $Interactive) {
-  & $py "$PSScriptRoot\cowork_audit.py" $UsageDir --days 8 --unattended *>> $log
-  if ($LASTEXITCODE -eq 0) { & $py "$PSScriptRoot\cowork_audit_report.py" $UsageDir *>> $log }
-  else { "cowork_audit failed (exit $LASTEXITCODE), credits report unaffected" | Add-Content $log }
+# Purview audit log (non-fatal: a search can take up to an hour, credits must not wait for it).
+#  1. Cowork detail: last 8 days, merged into cowork_audit/cowork_events.csv, then its HTML report.
+#  2. All Copilot / AI activity for yesterday -> ai_activity/daily_<day>_<day+1>.csv, then the cost-over-time report.
+# The interactive run asks for the audit permission once (second device code).
+$audit = @($UsageDir, '--unattended')
+if ($Interactive) { $audit = @($UsageDir) }
+$today = (Get-Date).ToString('yyyy-MM-dd'); $yday = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd')
+& $py "$PSScriptRoot\cowork_audit.py" @audit --days 8 *>> $log
+if ($LASTEXITCODE -eq 0) { & $py "$PSScriptRoot\cowork_audit_report.py" $UsageDir *>> $log }
+else { "cowork_audit failed (exit $LASTEXITCODE), credits report unaffected" | Add-Content $log }
+if (-not (Test-Path (Join-Path $UsageDir "ai_activity\daily_$($yday -replace '-')_$($today -replace '-').csv"))) {
+  & $py "$PSScriptRoot\ai_activity.py" $UsageDir --from $yday --to $today --unattended *>> $log
+  if ($LASTEXITCODE -ne 0) { "ai_activity failed (exit $LASTEXITCODE)" | Add-Content $log }
 }
+& $py "$PSScriptRoot\ai_cost_report.py" $UsageDir *>> $log
