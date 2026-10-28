@@ -23,3 +23,11 @@ if ($Interactive) {
 if ($LASTEXITCODE -ne 0) { throw "pull_credits failed (exit $LASTEXITCODE), see $log" }
 & $py "$PSScriptRoot\build_report.py" $UsageDir *>> $log
 if ($LASTEXITCODE -ne 0) { throw "build_report failed (exit $LASTEXITCODE), see $log" }
+
+# Cowork activity from the Purview audit log (last 8 days, merged into cowork_events.csv), then its HTML report.
+# Non-fatal: the audit search can take up to an hour, and credits must not wait for it.
+if (-not $Interactive) {
+  & $py "$PSScriptRoot\cowork_audit.py" $UsageDir --days 8 --unattended *>> $log
+  if ($LASTEXITCODE -eq 0) { & $py "$PSScriptRoot\cowork_audit_report.py" $UsageDir *>> $log }
+  else { "cowork_audit failed (exit $LASTEXITCODE), credits report unaffected" | Add-Content $log }
+}

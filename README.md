@@ -15,6 +15,8 @@ Output (written into a folder of your choice, e.g. a synced Teams/SharePoint fol
 | Script | Does |
 |---|---|
 | `pull_credits.py` | Signs in (device code, delegated), lists spending policies → their groups → members, reads each user's `userBalances/{id}/serviceBalances`, saves `snapshots/credits_<date>.csv`. Also saves the Copilot usage report and, if `CR_SITE` is set, a SharePoint list `CR Mapping` (UserEmail, CR_code, DateFrom, DateTo) as `cr_mapping.csv`. |
+| `cowork_audit.py` | Runs a Purview audit search through the Graph Audit Log Query API (`copilotInteraction`, keyword `CoworkChat`), keeps Cowork records, saves raw JSONL and merges `cowork_audit/cowork_events.csv` (one row per interaction: user, thread, model, tools, items read, labels, approvals). Needs Purview **Audit Reader** + `AuditLogsQuery.Read.All`. |
+| `cowork_audit_report.py` | Joins those events with credits month to date and CR, writes `cowork_audit/Cowork_Activity_Report.html`. |
 | `build_report.py` | Combines snapshots with monthly admin-center exports (`M365AIConsumptionByUser.<month>.csv`), assigns CRs, writes the workbook and dashboard. |
 
 The per-user cost endpoints are **delegated only** (no app-only permission), so the job runs as a signed-in admin on a
