@@ -50,16 +50,21 @@ def create(s, start, end) -> str:
 def stream(s, url):
     """pc.pages with a token refresh: a 0.5M-record read outlives the 1 h access token."""
     while url:
-        for _ in range(6):
-            r = s.get(url, timeout=120)
+        r = None
+        for _ in range(10):
+            try:
+                r = s.get(url, timeout=180)
+            except requests.exceptions.RequestException:  # slow page: retry the same link
+                time.sleep(15)
+                continue
             if r.status_code == 401:
                 s.headers["Authorization"] = f"Bearer {pc.token(False, ['https://graph.microsoft.com/AuditLogsQuery.Read.All'])}"
             elif r.status_code in (429, 503, 504):
                 time.sleep(int(r.headers.get("Retry-After", 10)))
             else:
                 break
-        if not r.ok:
-            sys.exit(f"{r.status_code} reading records: {r.text[:300]}")
+        if r is None or not r.ok:
+            sys.exit(f"{getattr(r, 'status_code', 'timeout')} reading records: {r.text[:300]}")
         body = r.json()
         yield from body.get("value", [])
         url = body.get("@odata.nextLink")

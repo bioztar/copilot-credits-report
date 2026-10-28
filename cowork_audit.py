@@ -41,8 +41,11 @@ def create(s, start: dt.datetime, end: dt.datetime) -> str:
 
 def wait(s, qid: str, max_min: int):
     for _ in range(max_min * 2):
-        r = s.get(f"{Q}/{qid}", timeout=60)
-        status = r.json().get("status") if r.ok else f"http {r.status_code}"
+        try:
+            r = s.get(f"{Q}/{qid}", timeout=120)
+            status = r.json().get("status") if r.ok else f"http {r.status_code}"
+        except requests.exceptions.RequestException as e:  # slow Graph response: keep polling
+            status = type(e).__name__
         if status == "succeeded":
             return r.json()
         if status in ("failed", "cancelled"):
